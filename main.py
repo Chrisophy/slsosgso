@@ -107,6 +107,11 @@ def get_db_connection():
     finally:
         conn.close()
 
+@staticmethod
+def make_key(title, url):
+    clean = re.sub(r'[^a-z0-9]', '', title.lower())
+    return f"{clean}_{hashlib.md5(url.encode()).hexdigest()[:8]}"
+
 # ==========================================
 # 4. CUSTOM WIDGETS
 # ==========================================
@@ -339,7 +344,7 @@ class MediaWidget(BoxLayout):
                     f.write(r.content)
 
                 def apply(dt):
-                    if self._requested_source == url:
+                    if hasattr(self, "_requested_source") and self._requested_source == url:
                         self._load_texture(path)
                 Clock.schedule_once(apply)
         except:
@@ -831,44 +836,30 @@ class MediaWidget(BoxLayout):
             'Kino - Filme'
         ]
     
-        results_map = {}  # key = video_url (oder fallback title)
+        results_map = {}
+        title_seen = set()   # ✅ FIX: muss HIER stehen
     
         try:
-            # ==========================================
-            # 1. QUERIES NACHEINANDER ABARBEITEN
-            # ==========================================
             for q in queries:
     
                 payload = {
-                    'queries': [
-                        {'fields': ['topic'], 'query': q}
-                    ],
+                    'queries': [{'fields': ['topic'], 'query': q}],
                     'size': 2000,
                     'sortBy': 'timestamp',
                     'sortOrder': 'desc'
                 }
     
                 r = self.session.post(api_url, json=payload, headers=headers, timeout=10)
-    
                 if r.status_code != 200:
                     continue
     
                 results = r.json().get('result', {}).get('results', [])
     
-                # ==========================================
-                # 2. ERGEBNISSE SAMMELN + DEDUPE
-                # ==========================================
                 for m in results:
                     url = m.get('url_video', '')
                     title = m.get('title', '')
     
-                    if not url:
-                        continue
-    
-                    # Dedupe-Key
-                    key = url
-    
-                    if key in results_map:
+                    if not url or not title:
                         continue
     
                     clean_name, prod_year = self.clean_title(title)
@@ -876,7 +867,16 @@ class MediaWidget(BoxLayout):
                     if not clean_name:
                         continue
     
-                    # EINZIGES FILTERKRITERIUM (optional minimal)
+                    # ✅ FIX: echtes Dedup
+                    if clean_name.lower() in title_seen:
+                        continue
+                    title_seen.add(clean_name.lower())
+    
+                    key = self.make_key(clean_name, url)
+    
+                    if key in results_map:
+                        continue
+    
                     if m.get('duration', 0) < 4680:
                         continue
     
@@ -895,9 +895,6 @@ class MediaWidget(BoxLayout):
         except Exception as e:
             print(f'Web-API Fehler: {e}')
     
-        # ==========================================
-        # 3. IN LISTE ÜBERFÜHREN + DB SPEICHERN
-        # ==========================================
         new_movies = []
     
         try:
@@ -920,52 +917,11 @@ class MediaWidget(BoxLayout):
                             json.dumps(movie['genres_list'])
                         )
                     )
-    
                 conn.commit()
     
         except Exception as e:
             print(f'DB Fehler: {e}')
     
-        # ==========================================
-        # 4. IPTV (UNVERÄNDERT)
-        # ==========================================
-        iptv_url = "https://raw.githubusercontent.com/jnk22/kodinerds-iptv/master/iptv/clean/clean_tv_main.m3u"
-    
-        try:
-            response = self.session.get(iptv_url, timeout=5)
-    
-            if response.status_code == 200:
-                lines = response.text.splitlines()
-    
-                for i in range(len(lines)):
-                    if lines[i].startswith("#EXTINF"):
-    
-                        logo_match = re.search(r'tvg-logo="([^"]+)"', lines[i])
-                        epg_match = re.search(r'tvg-id="([^"]+)"', lines[i])
-                        name = lines[i].split(',')[-1].strip()
-    
-                        if i + 1 < len(lines) and lines[i+1].startswith("http"):
-                            url = lines[i+1].strip()
-    
-                            if not any(m['video_url'] == url for m in new_movies):
-    
-                                new_movies.append({
-                                    'title': f"[TV] {name}",
-                                    'thumb': logo_match.group(1) if logo_match else "",
-                                    'video_url': url,
-                                    'search': name,
-                                    'epg_id': epg_match.group(1) if epg_match else "",
-                                    'plot': 'Live-TV Sender',
-                                    'rating': 'LIVE',
-                                    'genres_list': ['Live-TV']
-                                })
-    
-        except Exception as e:
-            print(f'IPTV Fehler: {e}')
-    
-        # ==========================================
-        # 5. SORT + UI UPDATE
-        # ==========================================
         new_movies.sort(key=lambda x: x['title'].lower())
     
         Clock.schedule_once(lambda dt: self._apply_data(new_movies))
@@ -983,9 +939,13 @@ class MediaWidget(BoxLayout):
             pass
 
     def _finish_load(self):
-        self.pending_loads -= 1
+        if self.pending_loads > 0:
+            self.pending_loads -= 1
+
         if self.pending_loads <= 0:
+            self.pending_loads = 0
             self.scanner.active = False
+
         self.queue_update()
 
     def _fetch_single_movie_info(self, movie_dict):
@@ -1022,7 +982,7 @@ class MediaWidget(BoxLayout):
                 
                 self._finish_load()
 
-            Clock.schedule_once(update_ui_item)
+            Clock.schedule_once(update_ui_item, 0)
 
         except Exception as e:
             print("THREAD ERROR:", e)
@@ -1296,7 +1256,7 @@ class MediaWidget(BoxLayout):
                     new_movies.append({
                         'title': r[0], 'video_url': r[1], 'search': r[2], 
                         'year': r[3], 'genres_list': json.loads(r[4]), 
-                        'thumb': img_path,
+                        'thumb': r[5] if r[5] else '',
                         'plot': 'Details verfügbar', 'rating': 'N/A'
                     })
                 
