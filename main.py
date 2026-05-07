@@ -725,6 +725,13 @@ class MediaWidget(BoxLayout):
         self.all_movies = movies
         self.filter_results()
         self.load_extra_info(movies)
+        unique = {}
+        for m in self.all_movies:
+            k = m['title'].strip().lower()
+            if k not in unique:
+                unique[k] = m
+
+        self.all_movies = list(unique.values())        
         
     def load_extra_info(self, movies):
         self.pending_loads = len(movies)
@@ -815,6 +822,7 @@ class MediaWidget(BoxLayout):
         return None
         
     def _do_fetch(self):
+        seen_titles = set()
         movies = list(self.all_movies)
     
         api_url = 'https://mediathekviewweb.de/api/query'
@@ -867,12 +875,45 @@ class MediaWidget(BoxLayout):
     
                     # Dedupe-Key
                     key = url
-    
+
+                    clean_name, prod_year = self.clean_title(title)
+                    lower_title = title.lower()
+                    title_norm = clean_name.strip().lower()
+
+                    # Audiodeskription raus (so wie gewünscht)
+                    if any(x in lower_title for x in [
+                        "audiodeskription",
+                        "audio description",
+                        "ad version",
+                        "hörfilm",
+                        "deskription",
+                        "barrierefrei version"
+                    ]):
+                        continue
+
+                    if not clean_name:
+                        continue
+
                     if key in results_map:
                         continue
+
+                    if title_norm in seen_titles:
+                        continue
+
+                    seen_titles.add(title_norm)
     
                     clean_name, prod_year = self.clean_title(title)
-    
+                    lower_title = title.lower()
+
+                    if any(x in lower_title for x in [
+                        "audiodeskription",
+                        "audio description",
+                        "ad version",
+                        "hörfilm",
+                        "deskription",
+                        "barrierefrei version"
+                    ]):
+                        continue    
                     if not clean_name:
                         continue
     
@@ -1279,10 +1320,20 @@ class MediaWidget(BoxLayout):
         try:
             with get_db_connection() as conn:
 
+                
                 query = """
-                    SELECT f.title, f.video_url, f.search_name, f.year, f.genres_json, c.local_poster 
+                    SELECT
+                        f.title,
+                        f.video_url,
+                        f.search_name,
+                        f.year,
+                        f.genres_json,
+                        c.local_poster,
+                        c.plot,
+                        c.rating
                     FROM film_list f
-                    LEFT JOIN movie_cache c ON f.search_name = c.search_title
+                    LEFT JOIN movie_cache c 
+                        ON (f.search_name || '_' || f.year) = c.search_title
                     ORDER BY f.title ASC
                 """
                 rows = conn.execute(query).fetchall()
@@ -1294,10 +1345,14 @@ class MediaWidget(BoxLayout):
                     img_path = r[5] if r[5] and os.path.exists(r[5]) else ''
                     
                     new_movies.append({
-                        'title': r[0], 'video_url': r[1], 'search': r[2], 
-                        'year': r[3], 'genres_list': json.loads(r[4]), 
+                        'title': r[0],
+                        'video_url': r[1],
+                        'search': r[2],
+                        'year': r[3],
+                        'genres_list': json.loads(r[4]),
                         'thumb': img_path,
-                        'plot': 'Details verfügbar', 'rating': 'N/A'
+                        'plot': r[6] if r[6] else 'Keine Beschreibung verfügbar.',
+                        'rating': r[7] if r[7] else 'N/A'
                     })
                 
                 self.all_movies = new_movies
